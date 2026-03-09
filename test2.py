@@ -181,4 +181,4 @@ def test_ddpg() -> None:
 
 
 if __name__ == "__main__":
-    test_output_vector_two_conditions()
+    test_ddpg()
