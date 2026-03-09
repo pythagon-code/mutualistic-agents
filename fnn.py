@@ -10,7 +10,7 @@ class FNN(nn.Module):
         output_size: int,
     ) -> None:
         super().__init__()
-        layers: list[nn.Module] = []
+        layers = []
         in_dim = input_size
         for _ in range(num_hidden_layers):
             layers.append(nn.Linear(in_dim, hidden_size))

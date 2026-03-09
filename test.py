@@ -1,7 +1,9 @@
+from torch.nn.parameter import Parameter
 from fnn import FNN
 import torch
 from torch import Tensor, nn, optim
 from torch.nn.functional import mse_loss
+from torch.nn.utils import clip_grad_norm_
 from tqdm import trange
 from typing import TypeVar
 
@@ -230,46 +232,83 @@ def test_a2c_single_actor() -> None:
         mean = actor(state)[..., 0:1]
         final_mse = mse_loss(mean, target)
     assert final_mse < 1e-3
+    
 
-
-def test_shared_representation() -> None:
-    embed_dim = 8
-    actor = FNN(
-        input_size = 1,
-        hidden_size = 32,
-        num_hidden_layers = 4,
-        output_size = embed_dim + 1,
-    ).to(device)
-    critic = FNN(
-        input_size = embed_dim + 1,
-        hidden_size = 32,
+def test_ddpg_norm_prediction() -> None:
+    state_dim = 4
+    net = FNN(
+        input_size = state_dim,
+        hidden_size = 16,
         num_hidden_layers = 4,
         output_size = 1,
     ).to(device)
-    joint_opt = optim.Adam(
-        list(actor.parameters()) + list(critic.parameters()),
-        lr = 1e-3,
-    )
-    all_params = list(actor.parameters()) + list(critic.parameters())
+    opt = optim.Adam(net.parameters(), lr = 1e-3)
+    for i in trange(20000, desc = "norm prediction"):
+        state = torch.rand(128, state_dim, device = device)
+        target = torch.norm(state, dim = -1)
+        pred = net(state).squeeze(-1)
+        loss = mse_loss(pred, target)
+        opt.zero_grad(set_to_none = True)
+        loss.backward()
+        opt.step()
+        if i % 250 == 0:
+            with torch.no_grad():
+                state = torch.rand(1024, state_dim, device = device)
+                target = torch.norm(state, dim = -1)
+                pred = net(state).squeeze(-1)
+                mse = mse_loss(pred, target)
+                print(f"step: {i}, mse: {mse.item()}")
+    with torch.no_grad():
+        state = torch.rand(1024, state_dim, device = device)
+        target = torch.norm(state, dim = -1)
+        pred = net(state).squeeze(-1)
+        final_mse = mse_loss(pred, target)
+    assert final_mse < 1e-3
+
+
+def test_shared_representation() -> None:
+    embed_dim = 16
+    actor_critic = FNN(
+        input_size = 1,
+        hidden_size = 64,
+        num_hidden_layers = 4,
+        output_size = 1 + embed_dim,
+    ).to(device)
+    critic = FNN(
+        input_size = 1 + embed_dim,
+        hidden_size = 64,
+        num_hidden_layers = 4,
+        output_size = 1,
+    ).to(device)
+    all_params = list[Parameter](actor_critic.parameters()) + list[Parameter](critic.parameters())
+    joint_opt = optim.Adam(all_params, lr = 1e-3)
     for i in trange(200000, desc = "shared representation"):
+        joint_opt.zero_grad(set_to_none = True)
         state = torch.rand(64, 1, device = device)
         target = state * torch.pi
-        params = actor(state)
+        params = actor_critic(state)
         action = params[..., 0:1]
         reward = -((action - target) ** 2).squeeze(-1).detach()
-        params_critic = torch.cat([params[..., 0:1].detach(), params[..., 1:]], dim = -1)
-        q_pred = critic(params_critic).squeeze(-1)
-        critic_loss_raw = mse_loss(q_pred, reward)
-        params_actor = torch.cat([params[..., 0:1], params[..., 1:].detach()], dim = -1)
+        action, embed = params[..., 0:1], params[..., 1:]
+        params_actor = torch.cat([action, embed.detach()], dim = -1)
         q_pred_actor = critic(params_actor).squeeze(-1)
         actor_loss_raw = -q_pred_actor.mean()
-        joint_opt.zero_grad(set_to_none = True)
-        actor_loss_raw.backward(retain_graph = True)
+        actor_loss_raw.backward()
         grad_actor = [p.grad.clone() if p.grad is not None else None for p in all_params]
+        
+        
         joint_opt.zero_grad(set_to_none = True)
+        state = torch.rand(64, 1, device = device)
+        target = state * torch.pi
+        params = actor_critic(state)
+        action = params[..., 0:1]
+        reward = -((action - target) ** 2).squeeze(-1).detach()
+        action, embed = params[..., 0:1], params[..., 1:]
+        params_critic = torch.cat([action, embed], dim = -1)
+        q_pred_critic = critic(params_critic).squeeze(-1)
+        critic_loss_raw = mse_loss(q_pred_critic, reward)
         critic_loss_raw.backward()
         grad_critic = [p.grad.clone() if p.grad is not None else None for p in all_params]
-        joint_opt.zero_grad(set_to_none = True)
         g_a = torch.cat([
             (g if g is not None else torch.zeros_like(p)).flatten()
             for p, g in zip(all_params, grad_actor)
@@ -280,13 +319,12 @@ def test_shared_representation() -> None:
         ])
         eps = 1e-8
         dot = (g_a * g_c).sum()
-        if dot < 0:
+        if dot < 0 and False:
             norm_a_sq = g_a.pow(2).sum()
             norm_c_sq = g_c.pow(2).sum()
-            if norm_c_sq >= norm_a_sq:
-                g_total = g_c - dot * g_a / (norm_a_sq + eps)
-            else:
-                g_total = g_a - dot * g_c / (norm_c_sq + eps)
+            g_a_proj = g_a - (dot / (norm_c_sq)) * g_c
+            g_c_proj = g_c - (dot / (norm_a_sq)) * g_a
+            g_total = g_a_proj + g_c_proj
         else:
             g_total = g_a + g_c
         offset = 0
@@ -295,16 +333,21 @@ def test_shared_representation() -> None:
             p.grad = g_total[offset : offset + n].view_as(p).clone()
             offset += n
         joint_opt.step()
-        if i % 1000 == 0:
+        if i % 500 == 0:
             with torch.no_grad():
-                mean = actor(state)[..., 0:1]
-                mse = mse_loss(mean, target)
-            print(f"step: {i}, mse: {mse.item()}")
+                params = actor_critic(state)
+                action = params[..., 0:1]
+                target = state * torch.pi
+                reward = -((action - target) ** 2).squeeze(-1)
+                q_pred = critic(params).squeeze(-1)
+                mse = -reward.mean()
+                critic_mse = mse_loss(q_pred, reward)
+            print(f"step: {i}, mse: {mse.item()}, critic_mse: {critic_mse.item()}")
     with torch.no_grad():
         state = torch.rand(1024, 1, device = device)
         target = state * torch.pi
-        mean = actor(state)[..., 0:1]
-        final_mse = mse_loss(mean, target)
+        action = actor_critic(state)[..., 0:1]
+        final_mse = mse_loss(action, target)
     assert final_mse < 1e-3
 
 
@@ -370,4 +413,4 @@ def test_loss_harmonization() -> None:
 
 
 if __name__ == "__main__":
-    test_shared_representation()
+    test_ddpg_norm_prediction()
