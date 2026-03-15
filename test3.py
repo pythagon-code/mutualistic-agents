@@ -8,8 +8,8 @@ from typing import Callable, TypeVar
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-ACTOR_POLYAK_FACTOR = 0.0001
-CRITIC_POLYAK_FACTOR = 0.01
+ACTOR_POLYAK_FACTOR = 0.001
+CRITIC_POLYAK_FACTOR = 0.0001
 
 T = TypeVar("T", float, Tensor)
 
@@ -316,6 +316,7 @@ class Critic(nn.Module):
 
 
 def test_mutual_cosine_similarity() -> None:
+    global CRITIC_POLYAK_FACTOR
     actor = Actor(
         vec_dim = 4,
         embed_dim = 8,
@@ -332,7 +333,7 @@ def test_mutual_cosine_similarity() -> None:
         critic_params = actor.forward(vec_a, vec_b, target)
         actor.train(critic, vec_a, vec_b, target)
         critic.train(*critic_params)
-        if i % 100 == 0:
+        if i % 25 == 0:
             actor_mse, actor_loss, critic_mse = actor.eval_mse(
                 critic = critic,
                 target_fn = cos_sim_of_cube,
@@ -340,7 +341,8 @@ def test_mutual_cosine_similarity() -> None:
             )
             print(
                 f"step: {i}, actor_mse: {actor_mse.item():.10f}, "
-                f"critic_loss: {critic_loss.item():.10f}, critic_mse: {critic_mse.item():.10f}"
+                f"actor_loss: {actor_loss.item():.10f}, critic_mse: {critic_mse.item():.10f}, "
+                f"critic_polyak_factor: {CRITIC_POLYAK_FACTOR:.10f}"
             )
 
     final_actor_mse, final_critic_loss, final_critic_mse = actor.eval_mse(
