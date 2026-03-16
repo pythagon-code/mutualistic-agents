@@ -1,4 +1,5 @@
 gymnasium[box2d]
 gymnasium[mujoco]
+gymnasium[other]
 numpy
 torch -f https://download.pytorch.org/whl/cu128
