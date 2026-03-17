@@ -19,3 +19,7 @@ def get_ema_and_emv(ema: T, emv: T, data: T, factor: float) -> tuple[T, T]:
 def polyak_update(target: nn.Module, online: nn.Module, polyak_factor: float) -> None:
     for online_param, target_param in zip(online.parameters(), target.parameters()):
         target_param.data.copy_(get_ema(target_param.data, online_param.data, polyak_factor))
+
+
+def flatten_module_list(module_list: nn.ModuleList) -> list[nn.Module]:
+    return [module for sublist in module_list for module in sublist]
