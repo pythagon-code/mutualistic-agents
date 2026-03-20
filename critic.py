@@ -16,13 +16,13 @@ class Critic(nn.Module):
         super().__init__()
         self._rng = rng
         self._discount_rate = config.discount_rate
-        self._polyak_factor = config.polyak_factor
+        self._polyak_factor = config.critic_polyak_factor
 
         num_encoders = config.num_encoders
         state_dim = config.state_dim
         embed_dim = config.embed_dim
         combined_dim = state_dim + embed_dim
-        num_hidden_layers = config.num_hidden_layers
+        num_hidden_layers = config.critic_num_hidden_layers
         self._encoders = nn.ModuleList([
             FNN(
                 input_size = combined_dim,
@@ -168,4 +168,4 @@ class Critic(nn.Module):
         self._optimizers[module_idx].step()
         self._optimizers[module_idx].zero_grad(set_to_none = True)
         polyak_update(self._target_models[module_idx], self._online_models[module_idx], self._polyak_factor)
-        return critic_loss.item(), target_q_value.mean().item()
+        return critic_loss.item(), target_q_value.mean().item(), module_idx

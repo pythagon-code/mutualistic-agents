@@ -12,13 +12,12 @@ class Actor(nn.Module):
     def __init__(self, config: Config, rng: np.random.Generator) -> None:
         super().__init__()
         self._rng = rng
-        self._polyak_factor = config.polyak_factor
-        self._action_tanh = config.action_tanh
+        self._polyak_factor = config.actor_polyak_factor
 
         num_encoders = config.num_encoders
         state_dim = config.state_dim
         embed_dim = config.embed_dim
-        num_hidden_layers = config.num_hidden_layers
+        num_hidden_layers = config.actor_num_hidden_layers
         self._encoders = nn.ModuleList([
             FNN(
                 input_size = state_dim,
@@ -68,17 +67,20 @@ class Actor(nn.Module):
             self._target_aggregators.append(level)
         
         action_dim = config.action_dim
+        action_activation = nn.Tanh() if config.action_tanh else nn.Identity()
         self._head = FNN(
             input_size = embed_dim,
             hidden_size = embed_dim,
             num_hidden_layers = num_hidden_layers,
             output_size = action_dim,
+            output_activation = action_activation,
         )
         self._target_head = FNN(
             input_size = embed_dim,
             hidden_size = embed_dim,
             num_hidden_layers = num_hidden_layers,
             output_size = action_dim,
+            output_activation = action_activation,
         )
 
         self._online_models = [*self._encoders, *flatten_module_list(self._aggregators), self._head]
@@ -129,8 +131,6 @@ class Actor(nn.Module):
             action = self._target_head(prev_embeds[0])
         all_embeds = torch.stack(all_embeds, dim = 1)
         action += torch.randn_like(action) * noise_std
-        if self._action_tanh:
-            action = torch.tanh(action)
         return all_embeds, action
 
 

@@ -8,6 +8,7 @@ class FNN(nn.Module):
         hidden_size: int,
         num_hidden_layers: int,
         output_size: int,
+        output_activation: nn.Module = nn.Identity(),
     ) -> None:
         super().__init__()
         layers = []
@@ -19,7 +20,8 @@ class FNN(nn.Module):
             in_dim = hidden_size
         layers.append(nn.Linear(hidden_size, output_size))
         self._net = nn.Sequential(*layers)
+        self._output_activation = output_activation
 
 
     def forward(self, x: Tensor) -> Tensor:
-        return self._net(x)
+        return self._output_activation(self._net(x))
