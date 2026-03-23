@@ -2,4 +2,6 @@ gymnasium[box2d]
 gymnasium[mujoco]
 gymnasium[other]
 numpy
+scipy
 torch -f https://download.pytorch.org/whl/cu128
+torchvision -f https://download.pytorch.org/whl/cu128

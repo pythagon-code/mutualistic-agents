@@ -4,9 +4,9 @@ from fnn import FNN
 import numpy as np
 import torch
 from torch import Tensor, nn, optim
-from torch.nn.functional import mse_loss
 from torch.nn.utils import clip_grad_norm_
-from utils import flatten_module_list, get_ema, get_ema_and_emv, polyak_update
+from utils import flatten_module_list, polyak_update
+
 
 class Actor(nn.Module):
     def __init__(self, config: Config, rng: np.random.Generator) -> None:
@@ -42,7 +42,7 @@ class Actor(nn.Module):
         assert self._fan_in ** (tree_depth - 1) == num_encoders
         combined_dim = embed_dim * self._fan_in
         self._aggregators = nn.ModuleList()
-        for i in range(tree_depth - 2, -1, -1):
+        for i in range(tree_depth - 2, 0, -1):
             level = nn.ModuleList([
                 FNN(
                     input_size = combined_dim,
@@ -54,7 +54,7 @@ class Actor(nn.Module):
             ])
             self._aggregators.append(level)
         self._target_aggregators = nn.ModuleList()
-        for i in range(tree_depth - 2, -1, -1):
+        for i in range(tree_depth - 2, 0, -1):
             level = nn.ModuleList([
                 FNN(
                     input_size = combined_dim,
@@ -65,29 +65,33 @@ class Actor(nn.Module):
                 for _ in range(self._fan_in ** i)
             ])
             self._target_aggregators.append(level)
-        
+
         action_dim = config.action_dim
         action_activation = nn.Tanh() if config.action_tanh else nn.Identity()
-        self._head = FNN(
-            input_size = embed_dim,
-            hidden_size = embed_dim,
+        self._final_aggregator = FNN(
+            input_size = combined_dim,
+            hidden_size = combined_dim,
             num_hidden_layers = num_hidden_layers,
             output_size = action_dim,
             output_activation = action_activation,
         )
-        self._target_head = FNN(
-            input_size = embed_dim,
-            hidden_size = embed_dim,
+        self._target_final_aggregator = FNN(
+            input_size = combined_dim,
+            hidden_size = combined_dim,
             num_hidden_layers = num_hidden_layers,
             output_size = action_dim,
             output_activation = action_activation,
         )
 
-        self._online_models = [*self._encoders, *flatten_module_list(self._aggregators), self._head]
+        self._online_models = [
+            *self._encoders,
+            *flatten_module_list(self._aggregators),
+            self._final_aggregator,
+        ]
         self._target_models = [
             *self._target_encoders,
             *flatten_module_list(self._target_aggregators),
-            self._target_head,
+            self._target_final_aggregator,
         ]
         assert len(self._online_models) == len(self._target_models)
         for online, target in zip(self._online_models, self._target_models):
@@ -99,7 +103,7 @@ class Actor(nn.Module):
         self._optimizers = [optim.Adam(model.parameters(), lr = lr) for model in self._online_models]
 
     
-    def forward(self, state: Tensor, noise_std: float = 0.0, module_idx: int = -1) -> tuple[Tensor, Tensor]:
+    def forward(self, state: Tensor, noise_std: float = 0.0, module_idx: int = -1, not_detach_idx: int = -1) -> tuple[Tensor, Tensor]:
         i = 0
         prev_embeds = []
         for encoder, target_encoder in zip(self._encoders, self._target_encoders):
@@ -109,6 +113,10 @@ class Actor(nn.Module):
                 prev_embeds.append(target_encoder(state))
             i += 1
         all_embeds = prev_embeds.copy()
+        if not_detach_idx != -1:
+            for idx in range(len(all_embeds)):
+                if idx != not_detach_idx:
+                    all_embeds[idx] = all_embeds[idx].detach()
         
         for level, target_level in zip(self._aggregators, self._target_aggregators):
             current_embeds = []
@@ -125,18 +133,19 @@ class Actor(nn.Module):
             prev_embeds = current_embeds
             all_embeds += prev_embeds
 
+        aggregator_in = torch.cat(prev_embeds[0 : self._fan_in], dim = -1)
         if i == module_idx:
-            action = self._head(prev_embeds[0])
+            action = self._final_aggregator(aggregator_in)
         else:
-            action = self._target_head(prev_embeds[0])
-        all_embeds = torch.stack(all_embeds, dim = 1)
+            action = self._target_final_aggregator(aggregator_in)
         action += torch.randn_like(action) * noise_std
+        all_embeds = torch.stack(all_embeds, dim = 1)
         return all_embeds, action
 
 
     def train(self, critic: "Critic", state: Tensor) -> float:
         module_idx = self._rng.integers(0, len(self._online_models))
-        all_embeds, action = self.forward(state, module_idx)
+        all_embeds, action = self.forward(state, module_idx = module_idx)
         q_values = critic.forward(state, all_embeds, action, module_idx = module_idx)
         q_value = torch.min(q_values[0], q_values[1])
         actor_loss = -q_value.mean()

@@ -6,7 +6,7 @@ from torch import Tensor, nn, optim
 from torch.nn.functional import mse_loss
 from torch.nn.utils import clip_grad_norm_
 from typing import TYPE_CHECKING
-from utils import get_ema, get_ema_and_emv, polyak_update
+from utils import get_ema, get_ema_and_emv, polyak_update, flatten_module_list
 
 if TYPE_CHECKING:
     from actor import Actor
@@ -44,13 +44,14 @@ class Critic(nn.Module):
         
         tree_depth = config.tree_depth
         self._fan_in = int(round(num_encoders ** (1 / (tree_depth - 1))))
-        combined_dim = embed_dim * self._fan_in + embed_dim
+        combined_dim_agg = embed_dim * self._fan_in + embed_dim
+        combined_dim_root = embed_dim * self._fan_in
         self._aggregators = nn.ModuleList()
-        for i in range(tree_depth - 2, -1, -1):
+        for i in range(tree_depth - 2, 0, -1):
             level = nn.ModuleList([
                 FNN(
-                    input_size = combined_dim,
-                    hidden_size = combined_dim,
+                    input_size = combined_dim_agg,
+                    hidden_size = combined_dim_agg,
                     num_hidden_layers = num_hidden_layers,
                     output_size = embed_dim,
                 )
@@ -58,17 +59,30 @@ class Critic(nn.Module):
             ])
             self._aggregators.append(level)
         self._target_aggregators = nn.ModuleList()
-        for i in range(tree_depth - 2, -1, -1):
+        for i in range(tree_depth - 2, 0, -1):
             level = nn.ModuleList([
                 FNN(
-                    input_size = combined_dim,
-                    hidden_size = combined_dim,
+                    input_size = combined_dim_agg,
+                    hidden_size = combined_dim_agg,
                     num_hidden_layers = num_hidden_layers,
                     output_size = embed_dim,
                 )
                 for _ in range(self._fan_in ** i)
             ])
             self._target_aggregators.append(level)
+
+        self._root_aggregator = FNN(
+            input_size = combined_dim_root,
+            hidden_size = combined_dim_agg,
+            num_hidden_layers = num_hidden_layers,
+            output_size = embed_dim,
+        )
+        self._target_root_aggregator = FNN(
+            input_size = combined_dim_root,
+            hidden_size = combined_dim_agg,
+            num_hidden_layers = num_hidden_layers,
+            output_size = embed_dim,
+        )
 
         action_dim = config.action_dim
         combined_dim = embed_dim + action_dim
@@ -90,8 +104,18 @@ class Critic(nn.Module):
             )
             for _ in range(2)
         ])
-        self._online_models = [*self._encoders, *self._aggregators, *self._heads]
-        self._target_models = [*self._target_encoders, *self._target_aggregators, *self._target_heads]
+        self._online_models = [
+            *self._encoders,
+            *flatten_module_list(self._aggregators),
+            *flatten_module_list(self._root_aggregator),
+            *self._heads,
+        ]
+        self._target_models = [
+            *self._target_encoders,
+            *flatten_module_list(self._target_aggregators),
+            *flatten_module_list(self._target_root_aggregator),
+            *self._target_heads,
+        ]
         for online, target in zip(self._online_models, self._target_models):
             target.load_state_dict(online.state_dict())
             for param in target.parameters():
@@ -131,6 +155,14 @@ class Critic(nn.Module):
                 current_embeds.append(embed)
                 i += 1
             prev_embeds = current_embeds
+
+        aggregator_in = torch.cat(prev_embeds[0 : self._fan_in], dim = -1)
+        if i == module_idx:
+            embed = self._root_aggregator(aggregator_in)
+        else:
+            embed = self._target_root_aggregator(aggregator_in)
+        i += 1
+        prev_embeds = [embed]
 
         head_in = torch.cat([prev_embeds[0], action], dim = -1)
         if i == module_idx:
