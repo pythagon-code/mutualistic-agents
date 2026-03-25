@@ -1,3 +1,9 @@
-*.mp4
-**/videos/
+.idea/
+.vscode/
+
+__pycache__/
+
 **/data/
+**/videos/
+
+**/dev/
