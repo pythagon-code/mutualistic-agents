@@ -1,7 +1,8 @@
-from fnn import FNN
 from math import sqrt
 from torch import Tensor, nn
-from utils import View
+
+from .fnn import FNN
+from .utils import View
 
 class EncoderCNN(nn.Module):
     def __init__(
@@ -10,6 +11,7 @@ class EncoderCNN(nn.Module):
         hidden_size: int,
         num_hidden_layers: int,
         num_channels: int,
+        num_conv_t_3s: int,
         num_upscales: int,
         num_conv_5s: int,
         num_conv_3s: int,
@@ -29,6 +31,17 @@ class EncoderCNN(nn.Module):
         initial_dim = int(sqrt(hidden_size / num_channels))
         assert initial_dim ** 2 * num_channels == hidden_size
         layers.append(View((-1, num_channels, initial_dim, initial_dim)))
+        for _ in range(num_upscales):
+            if batch_norm:
+                layers.append(nn.BatchNorm2d(num_channels))
+            layers.append(nn.LeakyReLU())
+            layers.append(nn.ConvTranspose2d(
+                num_channels,
+                num_channels,
+                kernel_size = 3,
+                stride = 1,
+                padding = 1,
+            ))
         for _ in range(num_upscales):
             if batch_norm:
                 layers.append(nn.BatchNorm2d(num_channels))

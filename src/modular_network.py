@@ -1,86 +1,106 @@
-from aggregator_cnn import AggregatorCNN
-from encoder_cnn import EncoderCNN
 import numpy as np
+import torch
 from torch import Tensor, nn
-from utils import flatten_2d_module_list, polyak_update
 
-class ModularCNN(nn.Module):
+from .fnn import FNN
+from .utils import flatten_2d_module_list, polyak_update
+
+class ModularNetwork(nn.Module):
     def __init__(
         self,
-        input_size: int,
-        hidden_size: int,
+        input_dim: int,
+        embed_dim: int,
         num_hidden_layers: int,
-        num_channels: int,
-        num_upscales: int,
-        num_conv_5s: int,
-        num_conv_3s: int,
         num_encoders: int,
         tree_depth: int,
         fan_in: int,
+        output_dim: int,
         rng: np.random.Generator,
-        batch_norm: bool = True,
+        output_activation: nn.Module = nn.Identity(),
         dropout_rate: float = .0,
+        layer_norm: bool = True,
+        spectral_norm: bool = False,
     ) -> None:
         super().__init__()
         assert fan_in ** (tree_depth - 1) == num_encoders
         self._fan_in = fan_in
         self._rng = rng
         self._encoders = nn.ModuleList([
-            EncoderCNN(
-                input_size        = input_size,
-                hidden_size       = hidden_size,
+            FNN(
+                input_size = input_dim,
+                hidden_size = embed_dim,
                 num_hidden_layers = num_hidden_layers,
-                num_channels      = num_channels,
-                num_upscales      = num_upscales,
-                num_conv_5s       = num_conv_5s,
-                num_conv_3s       = num_conv_3s,
-                batch_norm        = batch_norm,
-                dropout_rate      = dropout_rate,
+                output_size = embed_dim,
+                dropout_rate = dropout_rate,
+                layer_norm = layer_norm,
+                spectral_norm = spectral_norm,
             )
             for _ in range(num_encoders)
         ])
         self._aggregators = nn.ModuleList()
         for i in range(tree_depth - 2, -1, -1):
             level = nn.ModuleList([
-                AggregatorCNN(
-                    input_channels  = num_channels * fan_in,
-                    output_channels = 1 if i == 0 else num_channels,
-                    num_conv_5s     = num_conv_5s,
-                    num_conv_3s     = num_conv_3s,
-                    batch_norm      = batch_norm,
+                FNN(
+                    input_size = embed_dim * fan_in,
+                    hidden_size = embed_dim * fan_in,
+                    num_hidden_layers = num_hidden_layers,
+                    output_size = embed_dim,
+                    dropout_rate = dropout_rate,
+                    layer_norm = layer_norm,
+                    spectral_norm = spectral_norm,
                 )
                 for _ in range(fan_in ** i)
+            ]) if i > 0 else nn.ModuleList([
+                FNN(
+                    input_size = embed_dim * fan_in,
+                    hidden_size = embed_dim * fan_in,
+                    num_hidden_layers = num_hidden_layers,
+                    output_size = output_dim,
+                    output_activation = output_activation,
+                    layer_norm = layer_norm,
+                    spectral_norm = spectral_norm,
+                )
             ])
             self._aggregators.append(level)
 
         self._target_encoders = nn.ModuleList([
-            EncoderCNN(
-                input_size        = input_size,
-                hidden_size       = hidden_size,
+            FNN(
+                input_size = input_dim,
+                hidden_size = embed_dim,
                 num_hidden_layers = num_hidden_layers,
-                num_channels      = num_channels,
-                num_upscales      = num_upscales,
-                num_conv_5s       = num_conv_5s,
-                num_conv_3s       = num_conv_3s,
-                batch_norm        = batch_norm,
-                dropout_rate      = dropout_rate,
+                output_size = embed_dim,
+                dropout_rate = dropout_rate,
+                layer_norm = layer_norm,
+                spectral_norm = spectral_norm,
             )
             for _ in range(num_encoders)
         ])
         self._target_aggregators = nn.ModuleList()
         for i in range(tree_depth - 2, -1, -1):
             level = nn.ModuleList([
-                AggregatorCNN(
-                    input_channels  = num_channels * fan_in,
-                    output_channels = 1 if i == 0 else num_channels,
-                    num_conv_5s     = num_conv_5s,
-                    num_conv_3s     = num_conv_3s,
-                    batch_norm      = batch_norm,
+                FNN(
+                    input_size = embed_dim * fan_in,
+                    hidden_size = embed_dim * fan_in,
+                    num_hidden_layers = num_hidden_layers,
+                    output_size = embed_dim,
+                    dropout_rate = dropout_rate,
+                    layer_norm = layer_norm,
+                    spectral_norm = spectral_norm,
                 )
                 for _ in range(fan_in ** i)
+            ]) if i > 0 else nn.ModuleList([
+                FNN(
+                    input_size = embed_dim * fan_in,
+                    hidden_size = embed_dim * fan_in,
+                    num_hidden_layers = num_hidden_layers,
+                    output_size = output_dim,
+                    output_activation = output_activation,
+                    layer_norm = layer_norm,
+                    spectral_norm = spectral_norm,
+                )
             ])
             self._target_aggregators.append(level)
-
+        
         self._online_modules = tuple((
             *self._encoders,
             *flatten_2d_module_list(self._aggregators),
@@ -122,26 +142,27 @@ class ModularCNN(nn.Module):
             for j, (agg, target_agg) in enumerate(zip(lvl, target_lvl)):
                 start_idx = j * self._fan_in
                 end_idx = start_idx + self._fan_in
+                agg_in = torch.cat(prev_embeds[start_idx : end_idx], dim = -1)
                 if i == online_module_id:
-                    embed = agg(prev_embeds[start_idx : end_idx])
+                    embed = agg(agg_in)
                 else:
-                    embed = target_agg(prev_embeds[start_idx : end_idx])
+                    embed = target_agg(agg_in)
                 current_embeds.append(embed)
                 i += 1
             prev_embeds = current_embeds
-
+        
         assert len(prev_embeds) == 1
-        return prev_embeds[0].squeeze(dim = 1)
+        return prev_embeds[0]
 
-
-    def polyak_update(self, module_id: int, polyak_factor: float) -> None:
+    
+    def polyak_update(self, module_id : int, polyak_factor: float) -> None:
         polyak_update(
             target = self._target_modules[module_id],
             online = self._online_modules[module_id],
             polyak_factor = polyak_factor,
         )
 
-
+    
     def get_random_module_id(self) -> int:
         return self._rng.integers(0, len(self._online_modules))
 

@@ -1,6 +1,5 @@
 import torch
 from torch import Tensor, nn
-from torch.nn.utils import spectral_norm
 from typing import TypeVar
 
 class View(nn.Module):

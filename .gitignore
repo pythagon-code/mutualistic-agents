@@ -3,7 +3,6 @@
 
 __pycache__/
 
-**/data/
-**/videos/
+/temp/
 
-**/dev/
+/dev/
