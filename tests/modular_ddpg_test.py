@@ -84,7 +84,7 @@ actor_optimizer  = optim.Adam(actor.parameters(),  lr=learning_rate)
 critic_optimizer = optim.Adam(critic.parameters(), lr=learning_rate)
 
 # --- replay buffer ---
-replay          = ReplayBuffer(capacity=replay_buffer_size, batch_size=batch_size, rng=rng)
+replay          = ReplayBuffer(capacity=replay_buffer_size, batch_size=batch_size, device=device, rng=rng)
 episode_rewards = []
 train_updates   = 0
 env_steps       = 0

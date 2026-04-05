@@ -95,7 +95,7 @@ critic_optimizer = optim.Adam(critic.parameters(), lr=critic_lr)
 
 # --- replay buffer ---
 rng           = np.random.default_rng(0)
-replay_buffer = ReplayBuffer(capacity=replay_capacity, batch_size=batch_size, rng=rng)
+replay_buffer = ReplayBuffer(capacity=replay_capacity, batch_size=batch_size, device=device, rng=rng)
 
 # --- training ---
 episode_rewards = []
