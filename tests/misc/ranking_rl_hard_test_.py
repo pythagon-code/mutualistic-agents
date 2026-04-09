@@ -29,7 +29,7 @@ os.makedirs(image_dir)
 os.makedirs(video_dir)
 
 batch_size = 128
-replay_capacity = 100000
+replay_capacity = 15000
 gamma = 0.99
 actor_lr = 3e-4
 critic_lr = 3e-4
@@ -43,7 +43,7 @@ alpha_min = 0.01
 hidden_size = 256
 num_hidden_layers = 5
 print_interval = 100
-save_interval = 10
+save_interval = 20
 
 env = gym.make("HalfCheetah-v5")
 env = TimeLimit(env, max_episode_steps = 500)
@@ -123,7 +123,7 @@ for episode in trange(num_episodes):
 
             critic_optimizer.zero_grad(set_to_none = True)
             with torch.no_grad():
-                next_policy_params = target_actor(batch_next_state)
+                next_policy_params = actor(batch_next_state)
                 next_policy = get_tanh_multivariate_normal(next_policy_params, action_dim)
                 next_action = next_policy.sample()
                 next_q = target_critic(torch.cat([batch_next_state, next_action], dim = 1))
@@ -140,19 +140,19 @@ for episode in trange(num_episodes):
             policy = get_tanh_multivariate_normal(policy_params, action_dim)
             action1 = policy.sample()
             action2 = policy.sample()
-            prob1 = policy.log_prob(action1).exp().unsqueeze(1)
-            prob2 = policy.log_prob(action2).exp().unsqueeze(1)
+            log_prob1 = policy.log_prob(action1)
+            log_prob2 = policy.log_prob(action2)
             with torch.no_grad():
                 q1 = target_critic(torch.cat([batch_state, action1], dim = 1))
                 q2 = target_critic(torch.cat([batch_state, action2], dim = 1))
-            actor_loss, prob_contrast_mean = get_bradley_terry_loss(q1, q2, prob1, prob2)
+            actor_loss, _ = get_bradley_terry_loss(q1, q2, log_prob1, log_prob2, c = 5e-3, T = .5)
             actor_loss.backward()
             clip_grad_norm_(actor.parameters(), max_grad_norm)
             actor_optimizer.step()
             polyak_update(target_actor, actor, actor_polyak)
 
             if update_count % print_interval == 0:
-                print(f"{update_count}, al: {actor_loss.item():.8f}, cl: {critic_loss.item():.8f}, er: {episode_rewards[-1] if episode_rewards else 0:.8f}, pc: {prob_contrast_mean:.8f}")
+                print(f"{update_count}, al: {actor_loss.item():.8f}, cl: {critic_loss.item():.8f}, er: {episode_rewards[-1] if episode_rewards else 0:.8f}")
             alpha = max(alpha * alpha_decay, alpha_min)
             update_count += 1
 

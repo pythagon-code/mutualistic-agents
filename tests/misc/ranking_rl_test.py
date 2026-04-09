@@ -29,7 +29,7 @@ os.makedirs(image_dir)
 os.makedirs(video_dir)
 
 batch_size = 128
-replay_capacity = 100000
+replay_capacity = 20000
 gamma = 0.99
 actor_lr = 3e-4
 critic_lr = 3e-4
