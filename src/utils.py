@@ -24,14 +24,14 @@ def get_bradley_terry_loss(
         c: float = 1e-4,
         T: float = 1.0,
     ) -> tuple[Tensor, float]:
-    score1 = log_prob1.clamp(min = -10, max = 10).exp().unsqueeze(1)
-    score2 = log_prob2.clamp(min = -10, max = 10).exp().unsqueeze(1)
+    score1 = log_prob1.nan_to_num(nan = 0.0).clamp(min = -10, max = 10)
+    score2 = log_prob2.nan_to_num(nan = 0.0).clamp(min = -10, max = 10)
     with torch.no_grad():
         weight = abs(q1 - q2)
         weight = weight / weight.mean() + c
     score_diff = score1 - score2
     score_contrast = torch.where(q1 > q2, score_diff, -score_diff)
-    loss = -(weight * logsigmoid(score_contrast) / T).mean()
+    loss = -(T * weight * logsigmoid(score_contrast)).mean()
     return loss, score_contrast.mean().item()
 
 
@@ -45,6 +45,9 @@ def get_tanh_multivariate_normal(params: Tensor, action_dim: int) -> Transformed
     L = torch.zeros(params.shape[0], action_dim, action_dim, device = params.device)
     tril_indices = torch.tril_indices(row = action_dim, col = action_dim)
     L[:, tril_indices[0], tril_indices[1]] = scale
-    L_diag = L.diagonal(dim1 = -2, dim2 = -1)
-    L_diag[:] = torch.exp(L_diag).clamp(min = 1e-3)
-    return TransformedDistribution(MultivariateNormal(loc, scale_tril = L), TanhTransform())
+    L_diag_idx = torch.arange(action_dim, device = params.device)
+    L[:, L_diag_idx, L_diag_idx] = torch.exp(L[:, L_diag_idx, L_diag_idx].clamp(min = -8, max = 2))
+    return TransformedDistribution(
+        MultivariateNormal(loc, scale_tril = L),
+        TanhTransform(cache_size = 1),
+    )

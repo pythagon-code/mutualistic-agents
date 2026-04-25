@@ -21,10 +21,18 @@ class ReplayBuffer:
 
     def add(self, items: tuple[Tensor, ...]) -> None:
         self._buffer.append(items)
+
+
+    def clear(self) -> None:
+        self._buffer.clear()
         
 
     def ready(self) -> bool:
-        return len(self._buffer) >= self._batch_size
+        return len(self._buffer) >= self._batch_size * 10
+    
+
+    def full(self) -> bool:
+        return len(self._buffer) == self._buffer.maxlen
 
     
     def sample(self) -> tuple[Tensor, ...]:

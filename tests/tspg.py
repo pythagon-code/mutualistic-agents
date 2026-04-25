@@ -5,13 +5,13 @@ import os
 import shutil
 import sys
 import torch
-from gymnasium.wrappers import TimeLimit
+from gymnasium.wrappers import RecordVideo, TimeLimit
 from torch import nn, optim
 from torch.nn.functional import mse_loss
 from torch.nn.utils import clip_grad_norm_
 from tqdm import trange
 
-sys.path.insert(0, os.path.join(os.path.join(os.path.dirname(__file__), ".."), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from src.fnn import FNN
 from src.replay_buffer import ReplayBuffer
 from src.utils import (
@@ -30,25 +30,28 @@ image_dir = os.path.join("temp", "images", folder_name)
 if os.path.exists(image_dir):
     shutil.rmtree(image_dir)
 os.makedirs(image_dir)
+video_dir = os.path.join("temp", "videos", folder_name)
+if os.path.exists(video_dir):
+    shutil.rmtree(video_dir)
+os.makedirs(video_dir)
 
 batch_size = 128
 replay_capacity = 15000
 gamma = 0.99
 actor_lr = 3e-4
 critic_lr = 3e-4
-actor_polyak = 0.001
-critic_polyak = 0.005
+critic_polyak = 0.01
 update_every_steps = 20
 max_grad_norm = 0.5
 hidden_size = 256
 num_hidden_layers = 5
 print_interval = 100
-save_interval = 20
-T_decay = .9995
-T_min = 1e-2
+save_interval = 500
+alpha = 0.0005
+T_decay = .9996
+T_min = 1e-3
 
-env = gym.make("HalfCheetah-v5")
-env = TimeLimit(env, max_episode_steps = 500)
+env = gym.make("HalfCheetah-v5", max_episode_steps = 500)
 state_dim = env.observation_space.shape[0]
 action_dim = env.action_space.shape[0]
 policy_param_dim = get_multivariate_normal_size(action_dim)
@@ -60,13 +63,6 @@ actor = FNN(
     output_size = action_dim + action_dim * (action_dim + 1) // 2,
 ).to(device)
 
-critic = FNN(
-    input_size = state_dim + action_dim,
-    hidden_size = 256,
-    num_hidden_layers = 5,
-    output_size = 1,
-).to(device)
-
 critic1 = FNN(
     input_size = state_dim + action_dim,
     hidden_size = 256,
@@ -74,20 +70,6 @@ critic1 = FNN(
     output_size = 1,
 ).to(device)
 critic2 = FNN(
-    input_size = state_dim + action_dim,
-    hidden_size = 256,
-    num_hidden_layers = 5,
-    output_size = 1,
-).to(device)
-
-target_actor = FNN(
-    input_size = state_dim,
-    hidden_size = 256,
-    num_hidden_layers = 5,
-    output_size = action_dim + action_dim * (action_dim + 1) // 2,
-).to(device)
-
-target_critic = FNN(
     input_size = state_dim + action_dim,
     hidden_size = 256,
     num_hidden_layers = 5,
@@ -107,12 +89,6 @@ target_critic2 = FNN(
     output_size = 1,
 ).to(device)
 
-target_actor.load_state_dict(actor.state_dict())
-for param in target_actor.parameters():
-    param.requires_grad_(False)
-target_critic.load_state_dict(critic.state_dict())
-for param in target_critic.parameters():
-    param.requires_grad_(False)
 target_critic1.load_state_dict(critic1.state_dict())
 for param in target_critic1.parameters():
     param.requires_grad_(False)
@@ -189,20 +165,21 @@ for episode in trange(num_episodes):
             policy = get_tanh_multivariate_normal(policy_params, action_dim)
             action1 = policy.sample()
             action2 = policy.sample()
-            log_prob1 = policy.log_prob(action1)
-            log_prob2 = policy.log_prob(action2)
+            action3 = policy.sample()
+            log_prob1 = policy.log_prob(action1).unsqueeze(1).nan_to_num(nan = -1e8).clamp(min = -10, max = 10)
+            log_prob2 = policy.log_prob(action2).unsqueeze(1).nan_to_num(nan = -1e8).clamp(min = -10, max = 10)
+            negative_entropy_estimate = (log_prob1.mean() + log_prob2.mean()) / 2.
             with torch.no_grad():
-                q1 = target_critic1(torch.cat([batch_state, action1], dim = 1))
-                q2 = target_critic1(torch.cat([batch_state, action2], dim = 1))
+                q1 = critic1(torch.cat([batch_state, action1], dim = 1))
+                q2 = critic1(torch.cat([batch_state, action2], dim = 1))
             actor_loss, _ = get_bradley_terry_loss(q1, q2, log_prob1, log_prob2, c = c, T = T)
+            actor_loss = actor_loss - alpha * negative_entropy_estimate
             actor_loss.backward()
             clip_grad_norm_(actor.parameters(), max_grad_norm)
             actor_optimizer.step()
-            polyak_update(target_actor, actor, actor_polyak)
 
             if update_count % print_interval == 0:
-                print(f"\n{update_count}, al: {actor_loss.item():.8f}, cl: {critic1_loss.item():.8f}, er: {episode_rewards[-1] if episode_rewards else 0:.8f}")
-            alpha = max(alpha * alpha_decay, alpha_min)
+                print(f"\n{update_count}, al: {actor_loss:.8f}, cl: {critic1_loss:.8f}, en: {negative_entropy_estimate:.8f}, er: {episode_rewards[-1] if episode_rewards else 0:.8f}")
             update_count += 1
             T = max(T * T_decay, T_min)
 
@@ -219,6 +196,24 @@ for episode in trange(num_episodes):
         plt.title("HalfCheetah-v5 Ranking RL")
         plt.savefig(os.path.join(image_dir, f"rewards_{episode + 1}.png"))
         plt.close()
+
+        env_recording = RecordVideo(
+            gym.make("HalfCheetah-v5", max_episode_steps = 500, render_mode = "rgb_array"),
+            video_folder = video_dir,
+            name_prefix = f"video_{episode + 1}",
+        )
+        with torch.no_grad():
+            state, _ = env_recording.reset(seed = episode)
+            done = False
+            while not done:
+                state_t = torch.tensor(state, dtype = torch.float32, device = device).unsqueeze(0)
+                policy_params = actor(state_t)
+                policy = get_tanh_multivariate_normal(policy_params, action_dim)
+                action = policy.sample()
+                state, _, truncated, terminated, _ = env_recording.step(action[0].cpu().numpy())
+                done = truncated or terminated
+        env_recording.close()
+        print("\nDone saving.")
 
 plt.figure()
 plt.plot(episode_rewards)

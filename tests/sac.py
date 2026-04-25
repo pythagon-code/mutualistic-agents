@@ -11,18 +11,21 @@ from torch.nn.functional import mse_loss
 from torch.nn.utils import clip_grad_norm_
 from tqdm import trange
 
-sys.path.insert(0, os.path.join(os.path.join(os.path.dirname(__file__), ".."), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from src.fnn import FNN
 from src.replay_buffer import ReplayBuffer
 from src.utils import (
     device, get_bradley_terry_loss, get_multivariate_normal_size, get_tanh_multivariate_normal, polyak_update,
 )
 
-inputs = input("Enter iterations (int), c (float), T (float), folder name (str) in a single row: ")
-num_episodes, c, T, folder_name = inputs.split()
-num_episodes = int(num_episodes)
-c = float(c)
-T = float(T)
+if len(sys.argv) != 5:
+    print("Usage: python script.py <num_episodes> <c> <T> <folder_name>")
+    sys.exit(1)
+
+num_episodes = int(sys.argv[1])
+c = float(sys.argv[2])
+T = float(sys.argv[3])
+folder_name = sys.argv[4]
 image_dir = os.path.join("temp", "images", folder_name)
 if os.path.exists(image_dir):
     shutil.rmtree(image_dir)
@@ -142,13 +145,13 @@ for episode in trange(num_episodes):
             state = torch.tensor(state, dtype = torch.float32, device = device).unsqueeze(0)
             policy_params = actor(state)
             policy = get_tanh_multivariate_normal(policy_params, action_dim)
-            action = policy.sample()
+            action = policy.sample().cpu()
 
-        next_state, reward, terminated, truncated, _ = env.step(action[0].cpu().numpy())
+        next_state, reward, terminated, truncated, _ = env.step(action[0].numpy())
         episode_reward += reward
         done = terminated or truncated
         replay_buffer.add((
-            state,
+            state.cpu(),
             action,
             torch.tensor([[reward]], dtype = torch.float32),
             torch.tensor([[done]], dtype = torch.int32),
@@ -165,6 +168,7 @@ for episode in trange(num_episodes):
                 next_policy = get_tanh_multivariate_normal(next_policy_params, action_dim)
                 next_action = next_policy.sample()
                 next_log_prob = next_policy.log_prob(next_action).unsqueeze(1)
+                next_log_prob = next_log_prob.nan_to_num(nan = .0).clamp(min = -10, max = 10)
                 next_q1 = target_critic1(torch.cat([batch_next_state, next_action], dim = 1))
                 next_q2 = target_critic2(torch.cat([batch_next_state, next_action], dim = 1))
                 next_q = torch.min(next_q1, next_q2)
@@ -187,6 +191,7 @@ for episode in trange(num_episodes):
             policy = get_tanh_multivariate_normal(policy_params, action_dim)
             action = policy.rsample()
             log_prob = policy.log_prob(action).unsqueeze(1)
+            log_prob = log_prob.nan_to_num(nan = .0).clamp(min = -10, max = 10)
             q1 = target_critic1(torch.cat([batch_state, action], dim = 1))
             q2 = target_critic2(torch.cat([batch_state, action], dim = 1))
             q = torch.min(q1, q2)
@@ -206,13 +211,13 @@ for episode in trange(num_episodes):
         state = next_state
         iter_count += 1
 
-        if (episode + 1) % save_interval == 0:
-            plt.figure()
-            plt.plot(episode_rewards)
-            plt.xlabel("Episode")
-            plt.ylabel("Return")
-            plt.title("HalfCheetah-v5 Ranking RL")
-            plt.savefig(os.path.join(image_dir, f"rewards_{episode + 1}.png"))
-            plt.close()
+    if (episode + 1) % save_interval == 0:
+        plt.figure()
+        plt.plot(episode_rewards)
+        plt.xlabel("Episode")
+        plt.ylabel("Return")
+        plt.title("HalfCheetah-v5 SAC")
+        plt.savefig(os.path.join(image_dir, f"rewards_{episode + 1}.png"))
+        plt.close()
     
     episode_rewards.append(episode_reward)
